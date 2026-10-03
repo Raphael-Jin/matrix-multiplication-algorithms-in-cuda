@@ -214,8 +214,68 @@ void launch_matmul_tiled(const float* A, const float* B, float* C, int M, int N,
     matmul_tiled_kernel<<<grid, block>>>(A, B, C, M, N, K);
 }
 
-# Step 7 - matmul_tiled_1d_kernel (not yet solved)
-# TODO: implement
+# Step 7 - matmul_tiled_1d_kernel
+#include <cuda_runtime.h>
+
+constexpr int R1_BM = 64, R1_BN = 64, R1_BK = 8, R1_TM = 8;
+
+__global__ void matmul_tiled_1d_kernel(const float* A, const float* B, float* C,
+                                       int M, int N, int K) {
+    // 每个线程没读一个B，和8个A做乘加
+    __shared__ float As[R1_BM][R1_BK];
+    __shared__ float Bs[R1_BK][R1_BN];
+
+    const int tid = threadIdx.x;
+    const int blockRow = blockIdx.y * R1_BM;
+    const int blockCol = blockIdx.x * R1_BN;
+
+    // 这个线程负责的输出：第 threadCol 列，从 threadRowBase 开始的 8 行
+    const int threadCol     = tid % R1_BN;
+    const int threadRowBase = (tid / R1_BN) * R1_TM;
+
+    // 加载映射
+    const int aRow = tid / R1_BK, aCol = tid % R1_BK;   // 64 x 8
+    const int bRow = tid / R1_BN, bCol = tid % R1_BN;   // 8 x 64
+
+    float acc[R1_TM] = {0.0f};
+
+    for (int t = 0; t < K; t += R1_BK) {
+        int gAr = blockRow + aRow, gAc = t + aCol;
+        As[aRow][aCol] = (gAr < M && gAc < K) ? A[gAr * K + gAc] : 0.0f;
+
+        int gBr = t + bRow, gBc = blockCol + bCol;
+        Bs[bRow][bCol] = (gBr < K && gBc < N) ? B[gBr * N + gBc] : 0.0f;
+
+        __syncthreads();
+
+        #pragma unroll
+        for (int k = 0; k < R1_BK; ++k) {
+            float b = Bs[k][threadCol];          // 读一次，复用 8 次
+            #pragma unroll
+            for (int i = 0; i < R1_TM; ++i) {
+                acc[i] += As[threadRowBase + i][k] * b;
+            }
+        }
+
+        __syncthreads();
+    }
+
+    const int gCol = blockCol + threadCol;
+    #pragma unroll
+    for (int i = 0; i < R1_TM; ++i) {
+        int gRow = blockRow + threadRowBase + i;
+        if (gRow < M && gCol < N) {
+            C[gRow * N + gCol] = acc[i];
+        }
+    }
+}
+
+void launch_matmul_tiled_1d(const float* A, const float* B, float* C,
+                            int M, int N, int K) {
+    dim3 block(512);
+    dim3 grid((N + R1_BN - 1) / R1_BN, (M + R1_BM - 1) / R1_BM);
+    matmul_tiled_1d_kernel<<<grid, block>>>(A, B, C, M, N, K);
+}
 
 # Step 8 - matmul_tiled_2d_kernel (not yet solved)
 # TODO: implement
